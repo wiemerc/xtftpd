@@ -1,0 +1,38 @@
+--- RawSocketImpl.cpp.orig	2014-10-25 11:32:24.000000000 +0200
++++ RawSocketImpl.cpp	2014-10-24 07:27:57.000000000 +0200
+@@ -51,13 +51,13 @@
+ }
+ 
+ 
+-RawSocketImpl::RawSocketImpl(IPAddress::Family family, int proto)
++RawSocketImpl::RawSocketImpl(IPAddress::Family family, int proto, bool inclHeader)
+ {
+ 	if (family == IPAddress::IPv4)
+-		init2(AF_INET, proto);
++		init2(AF_INET, proto, inclHeader);
+ #if defined(POCO_HAVE_IPv6)
+ 	else if (family == IPAddress::IPv6)
+-		init2(AF_INET6, proto);
++		init2(AF_INET6, proto, inclHeader);
+ #endif
+ 	else throw InvalidArgumentException("Invalid or unsupported address family passed to RawSocketImpl");
+ 
+@@ -77,14 +77,15 @@
+ 
+ void RawSocketImpl::init(int af)
+ {
+-	init2(af, IPPROTO_RAW);
++	init2(af, IPPROTO_RAW, true);
+ }
+ 
+ 
+-void RawSocketImpl::init2(int af, int proto)
++void RawSocketImpl::init2(int af, int proto, bool inclHeader)
+ {
+ 	initSocket(af, SOCK_RAW, proto);
+-	setOption(IPPROTO_IP, IP_HDRINCL, 0);
++	if (inclHeader)
++		setOption(IPPROTO_IP, IP_HDRINCL, 0);
+ }
+ 
+ 

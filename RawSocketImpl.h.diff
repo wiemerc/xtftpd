@@ -1,0 +1,20 @@
+--- RawSocketImpl.h.orig	2014-10-25 12:10:36.000000000 +0200
++++ RawSocketImpl.h	2014-10-25 12:12:00.000000000 +0200
+@@ -55,7 +55,7 @@
+ 	RawSocketImpl();
+ 		/// Creates an unconnected IPv4 raw socket with IPPROTO_RAW.
+ 		
+-	RawSocketImpl(IPAddress::Family family, int proto = IPPROTO_RAW);
++	RawSocketImpl(IPAddress::Family family, int proto = IPPROTO_RAW, bool inclHeader = true);
+ 		/// Creates an unconnected raw socket.
+ 		///
+ 		/// The socket will be created for the
+@@ -66,7 +66,7 @@
+ 				
+ protected:
+ 	void init(int af);
+-	void init2(int af, int proto);
++	void init2(int af, int proto, bool inclHeader);
+ 	
+ 	~RawSocketImpl();
+ };
