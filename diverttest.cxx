@@ -82,6 +82,17 @@ class IPPacket
 		}
 
 
+		const std::string srcAddr() const
+		{
+			std::string addr;
+			for (int8_t offset = 0; offset <= 24; offset += 8)
+				addr += std::to_string ((m_srcAddr >> offset) & 0xff) + ".";
+
+			addr.resize (addr.size() - 1);
+			return addr;
+		}
+
+
 		uint8_t *payload()
 		{
 			return m_payload;
@@ -103,12 +114,11 @@ class ICMPEchoRequest
 		uint8_t m_payload[MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE];
 
 	public:
-		void calcChecksum (const uint16_t length)
+		void calcChecksum (const uint16_t dataLen)
 		{
-			// recalculate ICMP checksum (header *and* data), length is the total length of the IP packet,
-			// so we need to subtract the length of the IP header
+			// recalculate ICMP checksum (header *and* data)
 			m_checksum = 0;
-			m_checksum = chksum ((uint8_t *) this, length - IP_HDR_SIZE);
+			m_checksum = chksum ((uint8_t *) this, dataLen + ICMP_HDR_SIZE);
 		}
 
 
@@ -171,7 +181,7 @@ int main (int argc, char ** argv)
 			if (sock.receiveFrom (buffer, MAX_PACKET_SIZE, sender) >= IP_HDR_SIZE)
 			{
 				ip = new (buffer) IPPacket;
-				std::cerr << "IP packet received:" << std::endl;
+				std::cerr << "IP packet received from " << ip->srcAddr() << ":" << std::endl;
 				std::cerr << hexdump (buffer, 84) << std::endl;
 			}
 			else
@@ -193,14 +203,24 @@ int main (int argc, char ** argv)
 				continue;
 			}
 
-			// extract payload and replace numbers with 'x'
+			// extract payload, replace numbers with 'x' and add a string
 			if (ip->length() > (IP_HDR_SIZE + ICMP_HDR_SIZE))
 			{
 				uint8_t *data = icmp->payload();
-				int n = ip->length() - (IP_HDR_SIZE + ICMP_HDR_SIZE);
-				for (int i = n - 8; i < n; i++)
+				int dataLen = ip->length() - (IP_HDR_SIZE + ICMP_HDR_SIZE);
+				for (int i = dataLen - 8; i < dataLen; i++)
 					data[i] = 'x';
+				for (int i = dataLen; i < dataLen + 8; i++)
+					data[i] = 'y';
 				std::cerr << "changed payload" << std::endl;
+
+				// re-inject packet into network stack
+				icmp->calcChecksum (dataLen + 8);
+				ip->setLength (ip->length() + 8);
+				ip->calcChecksum();
+				sock.sendTo (buffer, ip->length(), sender);
+				std::cerr << "IP packet re-injected:" << std::endl;
+				std::cerr << hexdump (buffer, 92) << std::endl;
 			}
 			else
 			{
@@ -208,12 +228,6 @@ int main (int argc, char ** argv)
 				continue;
 			}
 
-			// re-inject packet into network stack
-			icmp->calcChecksum (ip->length());
-			ip->calcChecksum();
-			sock.sendTo (buffer, ip->length(), sender);
-			std::cerr << "IP packet re-injected:" << std::endl;
-			std::cerr << hexdump (buffer, 84) << std::endl;
 		}
 		// Normally we would have to call the dtors of the packet objects *explicitly* because of the placement new operator,
 		// but as they reside in the buffer allocated on the stack, there is actually nothing to destroy.
