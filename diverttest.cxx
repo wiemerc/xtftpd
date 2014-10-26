@@ -12,26 +12,25 @@ static const int ICMP_HDR_SIZE   = 8;			// for an echo request
 
 
 //
-// calculate IP / ICMP checksum
+// calculate IP / ICMP checksum (taken from the code for in_cksum() floating on the net)
 //
-static unsigned short chksum (unsigned char * bytes, unsigned int len)
+static uint16_t chksum (uint8_t * bytes, uint32_t len)
 {
-    unsigned int sum, i;
-    unsigned short * p;
+    uint32_t sum, i;
+    uint16_t * p;
 
     sum = 0;
-    p = (unsigned short *) bytes;
+    p = (uint16_t *) bytes;
 
-    for (i = len; i > 1; i -= 2)
+    for (i = len; i > 1; i -= 2)				// sum all 16-bit words
         sum += *p++;
 
-    if (i == 1)
-        sum += (unsigned short) *((unsigned char *) p);
+    if (i == 1)									// add an odd byte if necessary
+        sum += (uint16_t) *((uint8_t *) p);
 
-    while (sum & 0xffff0000)
-        sum = (sum >> 16) + (sum & 0x0000ffff);
-
-    return ~((unsigned short) sum);
+	sum = (sum >> 16) + (sum & 0x0000ffff);		// fold in upper 16 bits
+	sum += (sum >> 16);							// add carry bits
+    return ~((uint16_t) sum);					// return 1-complement truncated to 16 bits
 }
 
 
@@ -39,7 +38,6 @@ static unsigned short chksum (unsigned char * bytes, unsigned int len)
 // class representing an IP packet
 //
 // TODO: additional options are not considered
-// TODO: change byte order only in getter methods
 class IPPacket
 {
 		uint8_t  m_versionIHL;					// 4 bits version and 4 bits internet header length
@@ -58,28 +56,8 @@ class IPPacket
 		uint8_t m_payload[MAX_PACKET_SIZE - IP_HDR_SIZE];
 
 	public:
-		void netToHost()
+		void calcChecksum()
 		{
-			// change byte order
-			m_length      = ntohs (m_length);
-			m_id          = ntohs (m_id);
-			m_flagsOffset = ntohs (m_flagsOffset);
-			m_checksum    = ntohs (m_checksum);
-			m_srcAddr     = ntohl (m_srcAddr);
-			m_dstAddr     = ntohl (m_dstAddr);
-		}
-
-
-		void hostToNet()
-		{
-			// change byte order
-			m_length      = htons (m_length);
-			m_id          = htons (m_id);
-			m_flagsOffset = htons (m_flagsOffset);
-			m_checksum    = htons (m_checksum);
-			m_srcAddr     = htonl (m_srcAddr);
-			m_dstAddr     = htonl (m_dstAddr);
-
 			// recalculate IP checksum (header only)
 			m_checksum = 0;
 			m_checksum = chksum ((uint8_t *) this, IP_HDR_SIZE);
@@ -88,7 +66,13 @@ class IPPacket
 
 		const uint16_t length() const
 		{
-			return m_length;
+			return ntohs (m_length);
+		}
+
+
+		void setLength (const uint8_t length)
+		{
+			m_length = htons (length);
 		}
 
 
@@ -119,21 +103,8 @@ class ICMPEchoRequest
 		uint8_t m_payload[MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE];
 
 	public:
-		void netToHost()
+		void calcChecksum (const uint16_t length)
 		{
-			// change byte order
-			m_checksum    = ntohs (m_checksum);
-			m_id          = ntohs (m_id);
-			m_seqnum      = ntohs (m_seqnum);
-		}
-
-
-		void hostToNet (const uint16_t length)
-		{
-			m_checksum    = htons (m_checksum);
-			m_id          = htons (m_id);
-			m_seqnum      = htons (m_seqnum);
-
 			// recalculate ICMP checksum (header *and* data), length is the total length of the IP packet,
 			// so we need to subtract the length of the IP header
 			m_checksum = 0;
@@ -200,7 +171,6 @@ int main (int argc, char ** argv)
 			if (sock.receiveFrom (buffer, MAX_PACKET_SIZE, sender) >= IP_HDR_SIZE)
 			{
 				ip = new (buffer) IPPacket;
-				ip->netToHost();
 				std::cerr << "IP packet received:" << std::endl;
 				std::cerr << hexdump (buffer, 84) << std::endl;
 			}
@@ -215,7 +185,6 @@ int main (int argc, char ** argv)
 			if ((ip->protocol() == IPPROTO_ICMP) && (ip->length() >= (IP_HDR_SIZE + ICMP_HDR_SIZE)))
 			{
 				icmp = new (ip->payload()) ICMPEchoRequest;
-				icmp->netToHost();
 				std::cerr << "ICMP packet extracted" << std::endl;
 			}
 			else
@@ -240,11 +209,11 @@ int main (int argc, char ** argv)
 			}
 
 			// re-inject packet into network stack
-			icmp->hostToNet (ip->length());
+			icmp->calcChecksum (ip->length());
+			ip->calcChecksum();
+			sock.sendTo (buffer, ip->length(), sender);
 			std::cerr << "IP packet re-injected:" << std::endl;
 			std::cerr << hexdump (buffer, 84) << std::endl;
-			ip->hostToNet();
-			sock.sendTo (buffer, ntohs (ip->length()), sender);
 		}
 		// Normally we would have to call the dtors of the packet objects *explicitly* because of the placement new operator,
 		// but as they reside in the buffer allocated on the stack, there is actually nothing to destroy.
