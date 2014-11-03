@@ -1,6 +1,6 @@
 #include <iostream>
 #include <stdexcept>
-#include <c++/v1/exception>
+#include <cstring>
 
 #include "Poco/Format.h"
 #include "Poco/Net/RawSocket.h"
@@ -36,6 +36,23 @@ static uint16_t chksum (uint8_t * bytes, uint32_t len)
 
 
 //
+// class representing a memory buffer (for packets and payloads)
+//
+class Buffer
+{
+public:
+	uint8_t *m_addr;
+	uint16_t m_size;
+
+
+	Buffer (uint8_t *addr, const uint16_t size) : m_addr (addr), m_size (size)
+	{
+	}
+};
+
+
+
+//
 // class representing an IP packet
 //
 // TODO: additional options are not considered
@@ -56,17 +73,15 @@ class IPPacket
         } IPHeader;
 
         IPHeader *m_header;
-		uint8_t  *m_data;
-        uint16_t  m_length;
+		Buffer    m_payload;
 
 	public:
-        IPPacket (uint8_t *buffer, uint16_t length)
+        IPPacket (const Buffer &buffer) :
+			m_payload (buffer.m_addr + sizeof (IPHeader), buffer.m_size - sizeof (IPHeader))
         {
-            if (length > sizeof (IPHeader))
+            if (buffer.m_size > sizeof (IPHeader))
             {
-                m_header = (IPHeader *) buffer;
-                m_data   = buffer + sizeof (IPHeader);
-                m_length = length - sizeof (IPHeader);
+                m_header = (IPHeader *) buffer.m_addr;
             }
             else
                 throw std::runtime_error ("not enough bytes for IP packet");
@@ -77,19 +92,6 @@ class IPPacket
 			// recalculate IP checksum (header only)
 			m_header->m_checksum = 0;
 			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (IPHeader));
-		}
-
-
-		const uint16_t payloadLen() const
-		{
-			return m_length;
-		}
-
-
-		void setPayloadLen (const uint16_t length)
-		{
-            m_length = length;
-			m_header->m_length = htons (length + sizeof (IPHeader));
 		}
 
 
@@ -110,9 +112,31 @@ class IPPacket
 		}
 
 
-		uint8_t *payload()
+		Buffer packet()
 		{
-			return m_data;
+			return Buffer ((uint8_t *) m_header, sizeof (IPHeader) + m_payload.m_size);
+		}
+
+
+		Buffer payload()
+		{
+			return m_payload;
+		}
+
+
+		void setPayload (const Buffer &buffer)
+		{
+			// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
+			if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE))
+				throw std::runtime_error ("payload exceeds maximum size");
+			else
+			{
+				// If the new payload resides at a different memory location, we need to copy it
+				if (buffer.m_addr != m_payload.m_addr)
+					memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
+				m_payload.m_size     = buffer.m_size;
+				m_header->m_length = htons (buffer.m_size + IP_HDR_SIZE);
+			}
 		}
 };
 
@@ -133,17 +157,15 @@ class ICMPEchoRequest
         } ICMPEchoHeader;
 
         ICMPEchoHeader *m_header;
-		uint8_t        *m_data;
-        uint16_t        m_length;
+		Buffer			m_payload;
 
 	public:
-        ICMPEchoRequest (uint8_t *buffer, uint16_t length)
+        ICMPEchoRequest (const Buffer &buffer) :
+			m_payload (buffer.m_addr + sizeof (ICMPEchoHeader), buffer.m_size - sizeof (ICMPEchoHeader))
         {
-            if (length > sizeof (ICMPEchoHeader))
+            if (buffer.m_size > sizeof (ICMPEchoHeader))
             {
-                m_header = (ICMPEchoHeader *) buffer;
-                m_data   = buffer + sizeof (ICMPEchoHeader);
-                m_length = length - sizeof (ICMPEchoHeader);
+                m_header = (ICMPEchoHeader *) buffer.m_addr;
             }
             else
                 throw std::runtime_error ("not enough bytes for ICMP echo request");
@@ -153,25 +175,34 @@ class ICMPEchoRequest
 		{
 			// recalculate ICMP checksum (header *and* data)
 			m_header->m_checksum = 0;
-			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_length);
+			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
 		}
 
 
-		const uint16_t payloadLen() const
+		Buffer packet()
 		{
-			return m_length;
+			return Buffer ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
 		}
 
 
-		void setPayloadLen (const uint16_t length)
+		Buffer payload()
 		{
-            m_length = length;
+			return m_payload;
 		}
 
 
-		uint8_t *payload()
+		void setPayload (const Buffer &buffer)
 		{
-			return m_data;
+			// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
+			if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+				throw std::runtime_error ("payload exceeds maximum size");
+			else
+			{
+				// If the new payload resides at a different memory location, we need to copy it
+				if (buffer.m_addr != m_payload.m_addr)
+					memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
+				m_payload.m_size = buffer.m_size;
+			}
 		}
 };
 
@@ -185,7 +216,7 @@ std::string hexdump (const uint8_t *buffer, size_t length)
     {
         dump += Poco::format ("%04?x: ", pos);
         std::string line;
-        for (size_t i = pos; i < pos + 16; i++)
+        for (size_t i = pos; (i < pos + 16) && (i < length); i++)
         {
             dump += Poco::format ("%02?x ", buffer[i]);
             if (buffer[i] >= 0x20 && buffer[i] <= 0x7e)
@@ -217,17 +248,17 @@ int main (int argc, char ** argv)
 		Poco::Net::RawSocket     sock (Poco::Net::IPAddress::IPv4, IPPROTO_DIVERT, false);
 		Poco::Net::SocketAddress sender;
 		uint8_t					 buffer[MAX_PACKET_SIZE];
+		Buffer					 packet (buffer, MAX_PACKET_SIZE);
 
 		sock.bind (Poco::Net::SocketAddress (argv[1]));
 		std::cerr << "waiting for packets..." << std::endl;
-		// TODO: loop never terminates
-		// TODO: check if buffer is large enough
 		while (true)
 		{
 			// receive diverted IP packet from network stack (+ ICMP + payload)
-			IPPacket ip (buffer, sock.receiveFrom (buffer, MAX_PACKET_SIZE, sender));
+			packet.m_size = sock.receiveFrom (packet.m_addr, packet.m_size, sender);
+			IPPacket ip (packet);
             std::cerr << "IP packet received from " << ip.srcAddr() << ":" << std::endl;
-            std::cerr << hexdump (buffer, 84) << std::endl;
+            std::cerr << hexdump (ip.packet().m_addr, ip.packet().m_size) << std::endl;
 
 			// extract ICMP packet (we assume we only get ICMP echo requests)
 			if (ip.protocol() != IPPROTO_ICMP)
@@ -235,36 +266,29 @@ int main (int argc, char ** argv)
 				std::cerr << "IP packet does not contain an ICMP packet" << std::endl;
 				break;
 			}
-			ICMPEchoRequest icmp (ip.payload(), ip.payloadLen());	
+			ICMPEchoRequest icmp (ip.payload());
 			std::cerr << "ICMP packet extracted" << std::endl;
 
 			// extract payload, replace numbers with 'x' and add a string
             // TODO: create TFTP packet and send it as payload
-			if (icmp.payloadLen() > 0)
-			{
-				uint8_t *data = icmp.payload();
-				uint16_t len  = icmp.payloadLen();
-				for (int i = len - 8; i < len; i++)
-					data[i] = 'x';
-				for (int i = len; i < len + 8; i++)
-					data[i] = 'y';
-				std::cerr << "changed payload" << std::endl;
+			Buffer payload = icmp.payload();
+			uint8_t *data = payload.m_addr;
+			uint16_t len  = payload.m_size;
+			for (int i = len - 8; i < len; i++)
+				data[i] = 'x';
+			for (int i = len; i < len + 8; i++)
+				data[i] = 'y';
+			payload.m_size = len + 8;
+			std::cerr << "changed payload" << std::endl;
 
-				// re-inject packet into network stack
-				icmp.setPayloadLen (len + 8);
-				icmp.calcChecksum();
-				ip.setPayloadLen (ip.payloadLen() + 8);
-				ip.calcChecksum();
-				sock.sendTo (buffer, ip.payloadLen() + IP_HDR_SIZE, sender);
-				std::cerr << "IP packet re-injected:" << std::endl;
-				std::cerr << hexdump (buffer, 92) << std::endl;
-			}
-			else
-			{
-				std::cerr << "received an ICMP packet without payload" << std::endl;
-				continue;
-			}
-
+			// re-inject packet into network stack
+			icmp.setPayload (payload);
+			icmp.calcChecksum();
+			ip.setPayload (icmp.packet());
+			ip.calcChecksum();
+			sock.sendTo (ip.packet().m_addr, ip.packet().m_size, sender);
+			std::cerr << "IP packet re-injected:" << std::endl;
+			std::cerr << hexdump (ip.packet().m_addr, ip.packet().m_size) << std::endl;
 		}
 		sock.close();
 	}
