@@ -7,9 +7,10 @@
 #include "Poco/Net/SocketAddress.h"
 
 
-static const int MAX_PACKET_SIZE = 1500;
-static const int IP_HDR_SIZE     = 20;
-static const int ICMP_HDR_SIZE   = 8;			// for an echo request
+static const int MAX_PACKET_SIZE      = 1500;
+static const int MAX_TFTP_PACKET_SIZE = 512;
+static const int IP_HDR_SIZE          = 20;
+static const int ICMP_HDR_SIZE        = 8;			// for an echo request
 
 
 //
@@ -153,7 +154,6 @@ class ICMPEchoRequest
             uint16_t m_checksum;
             uint16_t m_id;
             uint16_t m_seqnum;
-//            uint16_t m_cookie;
         } ICMPEchoHeader;
 
         ICMPEchoHeader *m_header;
@@ -207,6 +207,109 @@ class ICMPEchoRequest
 };
 
 
+
+//
+// class representing a TFTP packet
+//
+class TFTPPacket
+{
+protected:
+	typedef struct
+	{
+		uint16_t m_cookie;				// an extension to the RFC
+		uint16_t m_opcode;
+	} TFTPHeader;
+
+	TFTPHeader *m_header;
+
+public:
+	// construct object from a buffer
+	TFTPPacket (const Buffer &buffer)
+	{
+		if (buffer.m_size >= sizeof (TFTPHeader))
+		{
+			m_header = (TFTPHeader *) buffer.m_addr;
+		}
+		else
+			throw std::runtime_error ("not enough bytes for TFTP packet");
+	}
+
+
+	// construct object in the specified buffer from parameters
+	TFTPPacket (const Buffer &buffer, const uint16_t cookie, const uint16_t opcode)
+	{
+		if (sizeof (TFTPHeader) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+			throw std::runtime_error ("buffer not large enough for TFTP packet");
+
+		m_header = (TFTPHeader *) buffer.m_addr;
+		m_header->m_cookie = htons (cookie);
+		m_header->m_opcode = htons (opcode);
+	}
+
+
+	const uint16_t cookie() const
+	{
+		return ntohs (m_header->m_cookie);
+	}
+
+
+	const uint16_t opcode() const
+	{
+		return ntohs (m_header->m_opcode);
+	}
+};
+
+
+
+class TFTPReqPacket : public TFTPPacket
+{
+	char    *m_data;				// contains both the file name and the mode as null-terminated strings
+	uint16_t m_size;
+
+    public:
+        // construct object from a buffer
+        TFTPReqPacket (const Buffer &buffer) : TFTPPacket (buffer)
+        {
+            if (buffer.m_size > sizeof (TFTPHeader))
+            {
+                m_data = (char *) buffer.m_addr + sizeof (TFTPHeader);
+            }
+            else
+                throw std::runtime_error ("not enough bytes for TFTP request packet");
+        }
+
+
+        // construct object in the specified buffer from parameters
+        TFTPReqPacket (const Buffer &buffer, const uint16_t cookie, const uint16_t opcode, const char * fname) :
+			TFTPPacket (buffer, cookie, opcode)
+        {
+			m_size = strlen (fname) + strlen ("netascii") + 2;	// + 2 accounts for the two terminating null bytes
+			if ((m_size + sizeof (TFTPHeader)) > MAX_TFTP_PACKET_SIZE)
+				throw std::runtime_error ("size of TFTP request packet exceeds maximum size for a TFTP packet");
+            if ((m_size + sizeof (TFTPHeader)) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+                throw std::runtime_error ("buffer not large enough for TFTP request packet");
+            
+			m_data = (char *) buffer.m_addr + sizeof (TFTPHeader);
+			strcpy (m_data, fname);
+			strcpy (m_data + strlen (fname) + 1, "netascii");
+        }
+
+
+		Buffer packet()
+		{
+			return Buffer ((uint8_t *) m_header, sizeof (TFTPHeader) + m_size);
+		}
+
+
+		const char *fname() const
+		{
+			// TODO: check if string is actually null-terminated
+			return m_data;
+		}
+};
+
+
+
 std::string hexdump (const uint8_t *buffer, size_t length)
 {
     std::string dump;
@@ -251,9 +354,10 @@ int main (int argc, char ** argv)
 		Buffer					 packet (buffer, MAX_PACKET_SIZE);
 
 		sock.bind (Poco::Net::SocketAddress (argv[1]));
-		std::cerr << "waiting for packets..." << std::endl;
 		while (true)
 		{
+			std::cerr << "waiting for packets..." << std::endl;
+
 			// receive diverted IP packet from network stack (+ ICMP + payload)
 			packet.m_size = sock.receiveFrom (packet.m_addr, packet.m_size, sender);
 			IPPacket ip (packet);
@@ -269,21 +373,13 @@ int main (int argc, char ** argv)
 			ICMPEchoRequest icmp (ip.payload());
 			std::cerr << "ICMP packet extracted" << std::endl;
 
-			// extract payload, replace numbers with 'x' and add a string
-            // TODO: create TFTP packet and send it as payload
-			Buffer payload = icmp.payload();
-			uint8_t *data = payload.m_addr;
-			uint16_t len  = payload.m_size;
-			for (int i = len - 8; i < len; i++)
-				data[i] = 'x';
-			for (int i = len; i < len + 8; i++)
-				data[i] = 'y';
-			payload.m_size = len + 8;
+			// replace payload with an TFTP request packet
+			TFTPReqPacket req (icmp.payload(), 4711, 1, "/etc/hosts");
+			icmp.setPayload (req.packet());
+			icmp.calcChecksum();
 			std::cerr << "changed payload" << std::endl;
 
 			// re-inject packet into network stack
-			icmp.setPayload (payload);
-			icmp.calcChecksum();
 			ip.setPayload (icmp.packet());
 			ip.calcChecksum();
 			sock.sendTo (ip.packet().m_addr, ip.packet().m_size, sender);
