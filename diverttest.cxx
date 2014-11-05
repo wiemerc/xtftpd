@@ -374,6 +374,13 @@ int main (int argc, char ** argv)
 			std::cerr << "ICMP packet extracted" << std::endl;
 
 			// replace payload with an TFTP request packet
+			TFTPPacket pkt (icmp.payload());
+			std::cerr << "packet received: cookie = " << std::to_string(pkt.cookie()) << ", opcode = " << std::to_string(pkt.opcode()) << std::endl;
+			if (pkt.opcode() == 1)
+			{
+				TFTPReqPacket pkt (icmp.payload());
+				std::cerr << "request received for file: " << pkt.fname() << std::endl;
+			}
 			TFTPReqPacket req (icmp.payload(), 4711, 1, "/etc/hosts");
 			icmp.setPayload (req.packet());
 			icmp.calcChecksum();
