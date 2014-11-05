@@ -1,14 +1,14 @@
-#!/usr/bin/python
+#!/opt/local/bin/python2.7
 #
 # xtftp.py - proof-of concept for a TFTP program which uses ICMP packets as transport
 #
-# Copyright(C) 2013 Constantin Wiemer
+# Copyright(C) 2013, 2014 Constantin Wiemer
 
 
 import sys
 import os
 import struct
-from scapy.all import * 
+from scapy.all import IP, ICMP
 import socket
 
 
@@ -33,8 +33,6 @@ state  = S_SENDING
 data   = ''
 
 s = socket.socket (socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-s.bind (('127.0.0.1', 0))
-s.setsockopt (socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
 while True:
     seq += 1
@@ -42,7 +40,7 @@ while True:
     if state == S_SENDING:
         # send read request
         pkt = struct.pack ('!H', cookie) + struct.pack ('!H', OP_RRQ) + sys.argv[2] + '\x00netascii\x00'
-        pkt = IP (dst = sys.argv[1]) / ICMP (id = cookie, seq = seq) / pkt 
+        pkt = ICMP (id = cookie, seq = seq) / pkt 
         state = S_WAITING
 
     elif state == S_WAITING:
