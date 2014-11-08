@@ -54,10 +54,21 @@ public:
 
 
 //
+// base class for all packet classes
+//
+class Packet
+{
+public:
+	virtual Buffer packet() const = 0;
+};
+
+
+
+//
 // class representing an IP packet
 //
 // TODO: additional options are not considered
-class IPPacket
+class IPPacket : public Packet
 {
         typedef struct 
         {
@@ -88,13 +99,6 @@ class IPPacket
                 throw std::runtime_error ("not enough bytes for IP packet");
         }
 
-		void calcChecksum()
-		{
-			// recalculate IP checksum (header only)
-			m_header->m_checksum = 0;
-			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (IPHeader));
-		}
-
 
 		const uint8_t protocol() const
 		{
@@ -113,31 +117,37 @@ class IPPacket
 		}
 
 
-		Buffer packet()
+		virtual Buffer packet() const
 		{
 			return Buffer ((uint8_t *) m_header, sizeof (IPHeader) + m_payload.m_size);
 		}
 
 
-		Buffer payload()
+		Buffer payload() const
 		{
 			return m_payload;
 		}
 
 
-		void setPayload (const Buffer &buffer)
+		IPPacket& operator| (const Packet &pkt)
 		{
 			// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
-			if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE))
+			if (pkt.packet().m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE))
 				throw std::runtime_error ("payload exceeds maximum size");
 			else
 			{
 				// If the new payload resides at a different memory location, we need to copy it
-				if (buffer.m_addr != m_payload.m_addr)
-					memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
-				m_payload.m_size     = buffer.m_size;
-				m_header->m_length = htons (buffer.m_size + IP_HDR_SIZE);
+				if (pkt.packet().m_addr != m_payload.m_addr)
+					memcpy (m_payload.m_addr, pkt.packet().m_addr, pkt.packet().m_size);
+				m_payload.m_size   = pkt.packet().m_size;
+				m_header->m_length = htons (pkt.packet().m_size + IP_HDR_SIZE);
 			}
+
+			// recalculate IP checksum (header only)
+			m_header->m_checksum = 0;
+			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (IPHeader));
+
+			return *this;
 		}
 };
 
@@ -145,7 +155,7 @@ class IPPacket
 //
 // class representing an ICMP echo request packet
 //
-class ICMPEchoRequest
+class ICMPEchoRequest : public Packet
 {
         typedef struct
         {
@@ -171,38 +181,37 @@ class ICMPEchoRequest
                 throw std::runtime_error ("not enough bytes for ICMP echo request");
         }
 
-		void calcChecksum()
-		{
-			// recalculate ICMP checksum (header *and* data)
-			m_header->m_checksum = 0;
-			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
-		}
 
-
-		Buffer packet()
+		virtual Buffer packet() const
 		{
 			return Buffer ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
 		}
 
 
-		Buffer payload()
+		Buffer payload() const
 		{
 			return m_payload;
 		}
 
 
-		void setPayload (const Buffer &buffer)
+		ICMPEchoRequest& operator| (const Packet &pkt)
 		{
 			// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
-			if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+			if (pkt.packet().m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
 				throw std::runtime_error ("payload exceeds maximum size");
 			else
 			{
 				// If the new payload resides at a different memory location, we need to copy it
-				if (buffer.m_addr != m_payload.m_addr)
-					memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
-				m_payload.m_size = buffer.m_size;
+				if (pkt.packet().m_addr != m_payload.m_addr)
+					memcpy (m_payload.m_addr, pkt.packet().m_addr, pkt.packet().m_size);
+				m_payload.m_size = pkt.packet().m_size;
 			}
+
+			// recalculate ICMP checksum (header *and* data)
+			m_header->m_checksum = 0;
+			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
+
+			return *this;
 		}
 };
 
@@ -211,7 +220,7 @@ class ICMPEchoRequest
 //
 // class representing a TFTP packet
 //
-class TFTPPacket
+class TFTPPacket : public Packet
 {
 protected:
 	typedef struct
@@ -244,6 +253,12 @@ public:
 		m_header = (TFTPHeader *) buffer.m_addr;
 		m_header->m_cookie = htons (cookie);
 		m_header->m_opcode = htons (opcode);
+	}
+
+
+	virtual Buffer packet() const
+	{
+		return Buffer ((uint8_t *) m_header, sizeof (TFTPHeader));
 	}
 
 
@@ -295,7 +310,7 @@ class TFTPReqPacket : public TFTPPacket
         }
 
 
-		Buffer packet()
+		virtual Buffer packet() const
 		{
 			return Buffer ((uint8_t *) m_header, sizeof (TFTPHeader) + m_size);
 		}
@@ -382,13 +397,10 @@ int main (int argc, char ** argv)
 				std::cerr << "request received for file: " << pkt.fname() << std::endl;
 			}
 			TFTPReqPacket req (icmp.payload(), 4711, 1, "/etc/hosts");
-			icmp.setPayload (req.packet());
-			icmp.calcChecksum();
 			std::cerr << "changed payload" << std::endl;
 
 			// re-inject packet into network stack
-			ip.setPayload (icmp.packet());
-			ip.calcChecksum();
+			ip = ip | (icmp | req);
 			sock.sendTo (ip.packet().m_addr, ip.packet().m_size, sender);
 			std::cerr << "IP packet re-injected:" << std::endl;
 			std::cerr << hexdump (ip.packet().m_addr, ip.packet().m_size) << std::endl;
