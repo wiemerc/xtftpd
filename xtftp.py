@@ -27,7 +27,9 @@ IP_HDR_LEN      = 20
 ICMP_HDR_LEN    = 8
 
 
-cookie = os.getpid()
+# TODO: PID can be larger than 65535 on OS X
+#cookie = os.getpid()
+cookie = 4711
 seq    = 0
 state  = S_SENDING
 data   = ''
@@ -39,6 +41,7 @@ while True:
 
     if state == S_SENDING:
         # send read request
+        # TODO: cookie is included twice
         pkt = struct.pack ('!H', cookie) + struct.pack ('!H', OP_RRQ) + sys.argv[2] + '\x00netascii\x00'
         pkt = ICMP (id = cookie, seq = seq) / pkt 
         state = S_WAITING
@@ -59,7 +62,7 @@ while True:
             data += ans[6:]
 
             pkt = struct.pack ('!H', cookie) + struct.pack ('!H', OP_ACK) + struct.pack ('!H', blknum)
-            pkt = IP (dst = sys.argv[1]) / ICMP (id = cookie, seq = seq) / pkt
+            pkt = ICMP (id = cookie, seq = seq) / pkt
 
         elif opcode == OP_ERROR:
             print "received error:", ans[4:-1]
