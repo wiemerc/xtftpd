@@ -1,6 +1,6 @@
 #!/opt/local/bin/python2.7
 #
-# xtftp.py - proof-of concept for a TFTP program which uses ICMP packets as transport
+# xtftp.py - client for the TFTP server with ICMP packets as transport
 #
 # Copyright(C) 2013, 2014 Constantin Wiemer
 
@@ -27,9 +27,7 @@ IP_HDR_LEN      = 20
 ICMP_HDR_LEN    = 8
 
 
-# TODO: PID can be larger than 65535 on OS X
-#cookie = os.getpid()
-cookie = 4711
+cookie = os.getpid() % 65536
 seq    = 0
 state  = S_SENDING
 data   = ''
@@ -41,13 +39,13 @@ while True:
 
     if state == S_SENDING:
         # send read request
-        # TODO: cookie is included twice
+        print "sending request for file '%s'..." % sys.argv[2]
         pkt = struct.pack ('!H', cookie) + struct.pack ('!H', OP_RRQ) + sys.argv[2] + '\x00netascii\x00'
         pkt = ICMP (id = cookie, seq = seq) / pkt 
         state = S_WAITING
 
     elif state == S_WAITING:
-        # answer is a data packet => store data and acknowledge it until
+		# process answer
         print "cookie =", struct.unpack ('!H', ans[0:2]) [0]
         if cookie != struct.unpack ('!H', ans[0:2]) [0]:
             print "incorrect cookie received:", struct.unpack ('!H', ans[0:2]) [0]
@@ -57,18 +55,21 @@ while True:
         print "opcode =", opcode
 
         if opcode == OP_DATA:
+			# answer is a data packet => store data and acknowledge it
             blknum = struct.unpack ('!H', ans[4:6]) [0]
-            print "blknum =", blknum
+            print "data packet received, blknum =", blknum
             data += ans[6:]
 
             pkt = struct.pack ('!H', cookie) + struct.pack ('!H', OP_ACK) + struct.pack ('!H', blknum)
             pkt = ICMP (id = cookie, seq = seq) / pkt
 
         elif opcode == OP_ERROR:
+			# answer is an error => terminate
             print "received error:", ans[4:-1]
             break
 
         elif opcode == OP_ACK:
+			# answer is the acknowledgement we sent => terminate
             print "acknowledgement received => received all data"
             break
 
@@ -76,13 +77,19 @@ while True:
             print "received invalid opcode:", opcode
             break
 
+
+	# send packet out
     s.sendto (str (pkt), 0, (sys.argv[1], 0))
+
+    # loop until we receive an ICMP echo reply packet, because of the raw socket we receive *all* ICMP packets
     ans = s.recvfrom (MAX_PACKET_SIZE) [0][IP_HDR_LEN:]
-    # We loop until we receive an ICMP echo reply packet because through the raw socket we receive *all* ICMP packets
     while ord (ans[0]) != 0:
         ans = s.recvfrom (MAX_PACKET_SIZE) [0][IP_HDR_LEN:]
     ans = ans[ICMP_HDR_LEN:]
+    print
+    print "answer received"
 
+
+print
 print "data received:"
 print data
-

@@ -1,5 +1,5 @@
 //
-// Proof-of-concept for a TFTP server (see RFC 1350 for details) which uses ICMP packets as transport
+// Proof-of-concept for a TFTP server (see RFC 1350 (http://tools.ietf.org/html/rfc1350) for details) which uses ICMP packets as transport
 // It uses FreeBSD divert socket to process packets in userspace and the Poco libraries (http://pocoproject.org/index.html).
 //
 // Copyright(C) 2013, 2014 Constantin Wiemer
@@ -10,7 +10,6 @@
 //
 // header files
 //
-// TODO: Which are needed?
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -28,7 +27,6 @@
 
 
 
-// TODO: cleanup code (unsigned / signed, const / non-const arguments, namespaces...)
 //
 // constants
 //
@@ -39,13 +37,11 @@ static const int ICMP_HDR_SIZE        = 8;			// for an echo request
 
 // opcodes
 static const uint16_t OP_RRQ	 = 1;
-static const uint16_t OP_WRQ	 = 2;
 static const uint16_t OP_DATA	 = 3;
 static const uint16_t OP_ACK	 = 4;
 static const uint16_t OP_ERROR  = 5;
 
 // states
-// TODO: all used?
 static const int S_IDLE         = 0;
 static const int S_READY        = 1;
 static const int S_WAIT_FOR_ACK = 2;
@@ -59,11 +55,7 @@ static const char *states[] =
 
 // error codes
 static const uint16_t E_UNDEF          = 0;
-static const uint16_t E_FILE_NOT_FOUND = 1;
-static const uint16_t E_ACCESS_DENIED  = 2;
-static const uint16_t E_DISK_FULL      = 3;
 static const uint16_t E_ILLEGAL_OPCODE = 4;
-static const uint16_t E_FILE_EXISTS    = 6;
 
 
 
@@ -91,6 +83,9 @@ static uint16_t chksum (uint8_t * bytes, uint32_t len)
 
 
 
+//
+// generate a hexdump from a buffer of bytes
+//
 std::string hexdump (const uint8_t *buffer, size_t length)
 {
     std::string dump;
@@ -143,93 +138,90 @@ public:
 
 
 //
-// class representing an IP packet
+// class representing an IP packet (without additional options)
 //
-// TODO: additional options are not considered
-// TODO: use bit fields
 class IPPacket
 {
-        typedef struct 
-        {
-            uint8_t  m_versionIHL;					// 4 bits version and 4 bits internet header length
-            uint8_t  m_TOS;
-            uint16_t m_length;
-            uint16_t m_id;
-            uint16_t m_flagsOffset;					// 3 bits flags and 13 bits fragment offset
-            uint8_t  m_TTL;
-            uint8_t  m_protocol;
-            uint16_t m_checksum;
-            uint32_t m_srcAddr;
-            uint32_t m_dstAddr;
-        } IPHeader;
+	typedef struct 
+	{
+		uint8_t  m_versionIHL;				// 4 bits version and 4 bits header length
+		uint8_t  m_TOS;
+		uint16_t m_length;
+		uint16_t m_id;
+		uint16_t m_flagsOffset;				// 3 bits flags and 13 bits fragment offset
+		uint8_t  m_TTL;
+		uint8_t  m_protocol;
+		uint16_t m_checksum;
+		uint32_t m_srcAddr;
+		uint32_t m_dstAddr;
+	} IPHeader;
 
-        IPHeader *m_header;
-		Buffer    m_payload;
+	IPHeader *m_header;
+	Buffer    m_payload;
 
-	public:
-        IPPacket (const Buffer &buffer) :
-			m_payload (buffer.m_addr + sizeof (IPHeader), buffer.m_size - sizeof (IPHeader))
-        {
-            if (buffer.m_size > sizeof (IPHeader))
-            {
-                m_header = (IPHeader *) buffer.m_addr;
-            }
-            else
-                throw std::runtime_error ("not enough bytes for IP packet");
-        }
 
-		void calcChecksum()
+public:
+	IPPacket (const Buffer &buffer) :
+		m_payload (buffer.m_addr + sizeof (IPHeader), buffer.m_size - sizeof (IPHeader))
+	{
+		if (buffer.m_size > sizeof (IPHeader))
 		{
-			// recalculate IP checksum (header only)
-			m_header->m_checksum = 0;
-			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (IPHeader));
+			m_header = (IPHeader *) buffer.m_addr;
+		}
+		else
+			throw std::runtime_error ("not enough bytes for IP packet");
+	}
+
+
+	const uint8_t protocol() const
+	{
+		return m_header->m_protocol;
+	}
+
+
+	const std::string srcAddr() const
+	{
+		std::string addr;
+		for (int8_t offset = 0; offset <= 24; offset += 8)
+			addr += std::to_string ((m_header->m_srcAddr >> offset) & 0xff) + ".";
+
+		addr.resize (addr.size() - 1);		// remove the last dot
+		return addr;
+	}
+
+
+	const Buffer packet() const
+	{
+		return Buffer ((uint8_t *) m_header, sizeof (IPHeader) + m_payload.m_size);
+	}
+
+
+	const Buffer payload() const
+	{
+		return m_payload;
+	}
+
+
+	void setPayload (const Buffer &buffer)
+	{
+		// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
+		if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE))
+			throw std::runtime_error ("payload exceeds maximum size");
+		else
+		{
+			// If the new payload resides at a different memory location, we need to copy it
+			if (buffer.m_addr != m_payload.m_addr)
+				memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
+			m_payload.m_size     = buffer.m_size;
+			m_header->m_length = htons (buffer.m_size + IP_HDR_SIZE);
 		}
 
-
-		const uint8_t protocol() const
-		{
-			return m_header->m_protocol;
-		}
-
-
-		const std::string srcAddr() const
-		{
-			std::string addr;
-			for (int8_t offset = 0; offset <= 24; offset += 8)
-				addr += std::to_string ((m_header->m_srcAddr >> offset) & 0xff) + ".";
-
-			addr.resize (addr.size() - 1);		// remove the last dot
-			return addr;
-		}
-
-
-		Buffer packet()
-		{
-			return Buffer ((uint8_t *) m_header, sizeof (IPHeader) + m_payload.m_size);
-		}
-
-
-		Buffer payload()
-		{
-			return m_payload;
-		}
-
-
-		void setPayload (const Buffer &buffer)
-		{
-			// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
-			if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE))
-				throw std::runtime_error ("payload exceeds maximum size");
-			else
-			{
-				// If the new payload resides at a different memory location, we need to copy it
-				if (buffer.m_addr != m_payload.m_addr)
-					memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
-				m_payload.m_size     = buffer.m_size;
-				m_header->m_length = htons (buffer.m_size + IP_HDR_SIZE);
-			}
-		}
+		// recalculate IP checksum (header only)
+		m_header->m_checksum = 0;
+		m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (IPHeader));
+	}
 };
+
 
 
 //
@@ -237,247 +229,244 @@ class IPPacket
 //
 class ICMPEchoRequest
 {
-        typedef struct
-        {
-            uint8_t  m_type;
-            uint8_t  m_code;
-            uint16_t m_checksum;
-            uint16_t m_id;
-            uint16_t m_seqnum;
-        } ICMPEchoHeader;
-
-        ICMPEchoHeader *m_header;
-		Buffer			m_payload;
-
-	public:
-        ICMPEchoRequest (const Buffer &buffer) :
-			m_payload (buffer.m_addr + sizeof (ICMPEchoHeader), buffer.m_size - sizeof (ICMPEchoHeader))
-        {
-            if (buffer.m_size > sizeof (ICMPEchoHeader))
-            {
-                m_header = (ICMPEchoHeader *) buffer.m_addr;
-            }
-            else
-                throw std::runtime_error ("not enough bytes for ICMP echo request");
-        }
-
-		void calcChecksum()
-		{
-			// recalculate ICMP checksum (header *and* data)
-			m_header->m_checksum = 0;
-			m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
-		}
-
-
-		Buffer packet()
-		{
-			return Buffer ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
-		}
-
-
-		Buffer payload()
-		{
-			return m_payload;
-		}
-
-
-		void setPayload (const Buffer &buffer)
-		{
-			// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
-			if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
-				throw std::runtime_error ("payload exceeds maximum size");
-			else
-			{
-				// If the new payload resides at a different memory location, we need to copy it
-				if (buffer.m_addr != m_payload.m_addr)
-					memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
-				m_payload.m_size = buffer.m_size;
-			}
-		}
-};
-
-
-
-//
-// classes representing a TFTP packet, different classes for different opcodes
-//
-class TFTPPacket
-{
-protected:
 	typedef struct
 	{
-		uint16_t m_cookie;				// an extension to the RFC
-		uint16_t m_opcode;
-	} TFTPHeader;
+		uint8_t  m_type;
+		uint8_t  m_code;
+		uint16_t m_checksum;
+		uint16_t m_id;
+		uint16_t m_seqnum;
+	} ICMPEchoHeader;
 
-	TFTPHeader *m_header;
+	ICMPEchoHeader *m_header;
+	Buffer			m_payload;
+
 
 public:
-	TFTPPacket()
+	ICMPEchoRequest (const Buffer &buffer) :
+		m_payload (buffer.m_addr + sizeof (ICMPEchoHeader), buffer.m_size - sizeof (ICMPEchoHeader))
 	{
-	}
-
-
-	// construct object from a buffer
-	TFTPPacket (const Buffer &buffer)
-	{
-		if (buffer.m_size >= sizeof (TFTPHeader))
+		if (buffer.m_size > sizeof (ICMPEchoHeader))
 		{
-			m_header = (TFTPHeader *) buffer.m_addr;
+			m_header = (ICMPEchoHeader *) buffer.m_addr;
 		}
 		else
-			throw std::runtime_error ("not enough bytes for TFTP packet");
+			throw std::runtime_error ("not enough bytes for ICMP echo request");
 	}
 
 
-	// construct object in the specified buffer from parameters
-	TFTPPacket (const Buffer &buffer, const uint16_t cookie, const uint16_t opcode)
+	const Buffer packet() const
 	{
-		if (sizeof (TFTPHeader) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
-			throw std::runtime_error ("buffer not large enough for TFTP packet");
-
-		m_header = (TFTPHeader *) buffer.m_addr;
-		m_header->m_cookie = htons (cookie);
-		m_header->m_opcode = htons (opcode);
+		return Buffer ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
 	}
 
 
-	Buffer packet()
+	const Buffer payload() const
 	{
-		return Buffer ((uint8_t *) m_header, sizeof (TFTPHeader));
+		return m_payload;
 	}
 
 
-	const uint16_t cookie() const
+	void setPayload (const Buffer &buffer)
 	{
-		return ntohs (m_header->m_cookie);
-	}
+		// We assume here that a buffer of size MAX_PACKET_SIZE has been allocated for us
+		if (buffer.m_size > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+			throw std::runtime_error ("payload exceeds maximum size");
+		else
+		{
+			// If the new payload resides at a different memory location, we need to copy it
+			if (buffer.m_addr != m_payload.m_addr)
+				memcpy (m_payload.m_addr, buffer.m_addr, buffer.m_size);
+			m_payload.m_size = buffer.m_size;
+		}
 
-
-	const uint16_t opcode() const
-	{
-		return ntohs (m_header->m_opcode);
+		// recalculate ICMP checksum (header *and* data)
+		m_header->m_checksum = 0;
+		m_header->m_checksum = chksum ((uint8_t *) m_header, sizeof (ICMPEchoHeader) + m_payload.m_size);
 	}
 };
 
 
 
-class TFTPReqPacket : public TFTPPacket
+//
+// classes representing a TFTP packet, different classes for different opcodes = different types of packets
+//
+namespace TFTP
 {
-	char    *m_repr;				// contains both the file name and the mode as null-terminated strings
-	uint16_t m_size;
+	class Packet
+	{
+	protected:
+		typedef struct
+		{
+			uint16_t m_cookie;				// an extension to the RFC
+			uint16_t m_opcode;
+		} Header;
+
+		Header *m_header;
+
+	public:
+		Packet()
+		{
+		}
+
+
+		// construct object from a buffer
+		Packet (const Buffer &buffer)
+		{
+			if (buffer.m_size >= sizeof (Header))
+			{
+				m_header = (Header *) buffer.m_addr;
+			}
+			else
+				throw std::runtime_error ("not enough bytes for a TFTP packet");
+		}
+
+
+		// construct object in the specified buffer from parameters
+		Packet (const Buffer &buffer, const uint16_t cookie, const uint16_t opcode)
+		{
+			if (sizeof (Header) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+				throw std::runtime_error ("buffer not large enough for TFTP packet");
+
+			m_header = (Header *) buffer.m_addr;
+			m_header->m_cookie = htons (cookie);
+			m_header->m_opcode = htons (opcode);
+		}
+
+
+		virtual const Buffer packet() const
+		{
+			return Buffer ((uint8_t *) m_header, sizeof (Header));
+		}
+
+
+		const uint16_t cookie() const
+		{
+			return ntohs (m_header->m_cookie);
+		}
+
+
+		const uint16_t opcode() const
+		{
+			return ntohs (m_header->m_opcode);
+		}
+	};
+
+
+
+	class ReqPacket : public Packet
+	{
+		char    *m_data;			// contains both the file name and the mode as null-terminated strings
 
     public:
-        // construct object from a buffer
-        TFTPReqPacket (const Buffer &buffer) : TFTPPacket (buffer)
+        ReqPacket (const Buffer &buffer) : Packet (buffer)
         {
-            if (buffer.m_size > sizeof (TFTPHeader))
+            if (buffer.m_size > sizeof (Header))
             {
-                m_repr = (char *) (buffer.m_addr + sizeof (TFTPHeader));
+                m_data = (char *) (buffer.m_addr + sizeof (Header));
             }
             else
                 throw std::runtime_error ("not enough bytes for TFTP request packet");
         }
 
 
-		const char *fname() const
+        const char *fname() const
+        {
+            // TODO: We should check if string is actually null-terminated
+            return m_data;
+        }
+	};
+
+
+
+	class DataPacket : public Packet
+	{
+		typedef struct
 		{
-			// TODO: check if string is actually null-terminated
-			return m_repr;
-		}
-};
+			uint16_t m_blknum;
+			uint8_t  m_bytes[];
+		} PacketData;
 
+		PacketData *m_data;
+		uint16_t    m_size;
 
-
-class TFTPDataPacket : public TFTPPacket
-{
-	typedef struct
-	{
-		uint16_t m_blknum;
-		uint8_t  m_bytes[1];				// TODO: zero-length array?
-	} TFTPDataPacketData;
-
-	TFTPDataPacketData *m_data;
-	uint16_t            m_size;
-
-public:
-	// construct object in the specified buffer from parameters
-	TFTPDataPacket (const Buffer &buffer, const uint16_t cookie, const uint16_t blknum, const std::vector <uint8_t> &data) :
-		TFTPPacket (buffer, cookie, OP_DATA)
-	{
-		if ((sizeof (TFTPHeader) + sizeof (TFTPDataPacketData) + data.size()) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
-			throw std::runtime_error ("buffer not large enough for TFTP data packet");
-		
-		m_data = (TFTPDataPacketData *) (buffer.m_addr + sizeof (TFTPHeader));
-		m_data->m_blknum = htons (blknum);
-		memcpy (m_data->m_bytes, data.data(), data.size());
-		m_size = data.size() + 2;
-	}
-
-
-	Buffer packet()
-	{
-		return Buffer ((uint8_t *) m_header, sizeof (TFTPHeader) + m_size);
-	}
-};
-
-
-
-class TFTPAckPacket : public TFTPPacket
-{
-	uint16_t *m_blknum;
-
-public:
-	// construct object from a buffer
-	TFTPAckPacket (const Buffer &buffer) : TFTPPacket (buffer)
-	{
-		if (buffer.m_size > sizeof (TFTPHeader))
+	public:
+		DataPacket (const Buffer &buffer, const uint16_t cookie, const uint16_t blknum, const std::vector <uint8_t> &data) :
+			Packet (buffer, cookie, OP_DATA)
 		{
-			m_blknum = (uint16_t *) (buffer.m_addr + sizeof (TFTPHeader));
+			if ((sizeof (Header) + sizeof (PacketData) + data.size()) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+				throw std::runtime_error ("buffer not large enough for TFTP data packet");
+			
+			m_data = (PacketData *) (buffer.m_addr + sizeof (Header));
+			m_data->m_blknum = htons (blknum);
+			memcpy (m_data->m_bytes, data.data(), data.size());
+			m_size = data.size() + 2;
 		}
-		else
-			throw std::runtime_error ("not enough bytes for TFTP acknowledgment packet");
-	}
 
 
-	const uint16_t blknum() const
+		virtual const Buffer packet() const
+		{
+			return Buffer ((uint8_t *) m_header, sizeof (Header) + m_size);
+		}
+	};
+
+
+
+	class AckPacket : public Packet
 	{
-		return ntohs (*m_blknum);
-	}
-};
+		uint16_t *m_blknum;
+
+	public:
+		AckPacket (const Buffer &buffer) : Packet (buffer)
+		{
+			if (buffer.m_size > sizeof (Header))
+			{
+				m_blknum = (uint16_t *) (buffer.m_addr + sizeof (Header));
+			}
+			else
+				throw std::runtime_error ("not enough bytes for TFTP acknowledgment packet");
+		}
+
+
+		const uint16_t blknum() const
+		{
+			return ntohs (*m_blknum);
+		}
+	};
 
 
 
-class TFTPErrorPacket : public TFTPPacket
-{
-	typedef struct
+	class ErrorPacket : public Packet
 	{
-		uint16_t m_errcode;
-		uint8_t  m_errmsg[1];
-	} TFTPErrorPacketData;
+		typedef struct
+		{
+			uint16_t m_errcode;
+			uint8_t  m_errmsg[];
+		} PacketData;
 
-	TFTPErrorPacketData *m_repr;
-	uint16_t             m_size;
+		PacketData *m_data;
+		uint16_t    m_size;
 
-public:
-	TFTPErrorPacket (const Buffer &buffer, const uint16_t cookie, const uint16_t errcode, const char *errmsg) :
-		TFTPPacket (buffer, cookie, OP_ERROR)
-	{
-		if ((sizeof (TFTPHeader) + sizeof (TFTPErrorPacketData) + strlen (errmsg)) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
-			throw std::runtime_error ("buffer not large enough for TFTP error packet");
-		
-		m_repr = (TFTPErrorPacketData *) (buffer.m_addr + sizeof (TFTPHeader));
-		m_repr->m_errcode = htons (errcode);
-		strcpy ((char *) m_repr->m_errmsg, errmsg);
-		m_size = strlen (errmsg) + 3;
-	}
+	public:
+		ErrorPacket (const Buffer &buffer, const uint16_t cookie, const uint16_t errcode, const char *errmsg) :
+			Packet (buffer, cookie, OP_ERROR)
+		{
+			if ((sizeof (Header) + sizeof (PacketData) + strlen (errmsg) + 1) > (MAX_PACKET_SIZE - IP_HDR_SIZE - ICMP_HDR_SIZE))
+				throw std::runtime_error ("buffer not large enough for TFTP error packet");
+			
+			m_data = (PacketData *) (buffer.m_addr + sizeof (Header));
+			m_data->m_errcode = htons (errcode);
+			strcpy ((char *) m_data->m_errmsg, errmsg);
+			m_size = strlen (errmsg) + 3;
+		}
 
 
-	Buffer packet()
-	{
-		return Buffer ((uint8_t *) m_header, sizeof (TFTPHeader) + m_size);
-	}
-};
+		virtual const Buffer packet() const
+		{
+			return Buffer ((uint8_t *) m_header, sizeof (Header) + m_size);
+		}
+	};
+};  // namespace TFTP
 
 
 
@@ -486,11 +475,14 @@ public:
 //
 class TFTPServer : public Poco::Util::ServerApplication 
 {
+    log4cxx::LoggerPtr logger;
 	Buffer buffer;
 
 public:
-	TFTPServer() : buffer (new uint8_t[MAX_PACKET_SIZE], MAX_PACKET_SIZE)
+	TFTPServer() : logger (log4cxx::Logger::getLogger ("tftpd")),
+                   buffer (new uint8_t[MAX_PACKET_SIZE], MAX_PACKET_SIZE)
 	{
+		log4cxx::PropertyConfigurator::configure ("logging.properties");
 	}
 
 
@@ -503,9 +495,6 @@ public:
 
 	int main (const std::vector<std::string> &args)
 	{
-		// setup logging
-		log4cxx::PropertyConfigurator::configure ("logging.properties");
-		log4cxx::LoggerPtr logger (log4cxx::Logger::getLogger ("tftpd"));
 		LOG4CXX_INFO (logger, "server has started up");
 
 		try
@@ -529,25 +518,25 @@ public:
 				//
 				Poco::Net::SocketAddress sender;
 				buffer.m_size = sock.receiveFrom (buffer.m_addr, MAX_PACKET_SIZE, sender);
-				IPPacket ip (buffer);
-				LOG4CXX_INFO (logger, "IP packet received from " << ip.srcAddr());
-				LOG4CXX_DEBUG (logger, "hex dump of packet:\n" << hexdump (buffer.m_addr, buffer.m_size));
+				IPPacket ippkt (buffer);
+				LOG4CXX_INFO (logger, "IP packet received from " << ippkt.srcAddr());
+				LOG4CXX_TRACE (logger, "hex dump of packet:\n" << hexdump (buffer.m_addr, buffer.m_size));
 
 				//
 				// extract ICMP packet (we assume we only get ICMP echo requests)
 				//
-				if (ip.protocol() != IPPROTO_ICMP)
+				if (ippkt.protocol() != IPPROTO_ICMP)
 				{
 					LOG4CXX_DEBUG (logger, "IP packet does not contain an ICMP packet - re-injecting it");
-					sock.sendTo (ip.packet().m_addr, ip.packet().m_size, sender);
+					sock.sendTo (ippkt.packet().m_addr, ippkt.packet().m_size, sender);
 				}
-				ICMPEchoRequest icmp (ip.payload());
+				ICMPEchoRequest icmppkt (ippkt.payload());
 				LOG4CXX_DEBUG (logger, "ICMP packet extracted");
 
 				//
 				// extract TFTP packet and handle it according to the state we're currently in
 				//
-				TFTPPacket inpkt (icmp.payload());
+				TFTP::Packet inpkt (icmppkt.payload());
 				LOG4CXX_DEBUG (logger, "TFTP packet extracted: cookie = " << inpkt.cookie() << ", opcode = " << inpkt.opcode());
 
 				while (true)
@@ -564,7 +553,7 @@ public:
 						{
 							// We store the cookie and accept subsequent packets only if they have the same cookie.
 							// Only a new read requests resets the cookie.
-							TFTPReqPacket req (icmp.payload());
+							TFTP::ReqPacket req (icmppkt.payload());
 							cookie = req.cookie();
 							LOG4CXX_INFO (logger, "received read request from client for file '" << req.fname() << "' with cookie " << req.cookie());
 
@@ -575,8 +564,8 @@ public:
 						}
 						else
 						{
-							icmp.setPayload (TFTPErrorPacket (icmp.payload(), cookie, E_ILLEGAL_OPCODE, "illegal opcode").packet());
-							LOG4CXX_INFO (logger, "illegal opcode (expected OP_RRQ) - sending error packet to client");
+							icmppkt.setPayload (TFTP::ErrorPacket (icmppkt.payload(), cookie, E_ILLEGAL_OPCODE, "illegal opcode").packet());
+							LOG4CXX_ERROR (logger, "illegal opcode (expected OP_RRQ) - sending error packet to client");
 							break;
 						}
 					} // S_IDLE
@@ -587,7 +576,7 @@ public:
 					//
 					else if (state == S_READY)
 					{
-						std::vector <uint8_t> data (MAX_TFTP_PACKET_SIZE + 1);		// TODO: why + 1?
+						std::vector <uint8_t> data (MAX_TFTP_PACKET_SIZE + 1);
 						file.read ((char *) data.data(), MAX_TFTP_PACKET_SIZE);
 
 						// We need to set the size of the vector to the number of bytes actually read so the client can detect
@@ -595,8 +584,8 @@ public:
 						data.resize (file.gcount());
 
 						blknum++;
-						icmp.setPayload (TFTPDataPacket (icmp.payload(), cookie, blknum, data).packet());
-						LOG4CXX_DEBUG (logger, "sending data packet # " << blknum << " to client" );
+						icmppkt.setPayload (TFTP::DataPacket (icmppkt.payload(), cookie, blknum, data).packet());
+						LOG4CXX_INFO (logger, "sending data packet # " << blknum << " to client" );
 
 						state = S_WAIT_FOR_ACK;
 						break;
@@ -610,16 +599,15 @@ public:
 					{
 						if ((inpkt.opcode() == OP_ACK) && (inpkt.cookie() == cookie))
 						{
-							TFTPAckPacket ack (icmp.payload());
-							LOG4CXX_DEBUG (logger, "ACK received for data packet # " << ack.blknum());
+							TFTP::AckPacket ack (icmppkt.payload());
+							LOG4CXX_INFO (logger, "ACK received for data packet # " << ack.blknum());
 							if (blknum == ack.blknum())
 							{
 								if (file.eof())
 								{
-									LOG4CXX_DEBUG (logger, "last packet sent => terminating");
+									LOG4CXX_INFO (logger, "last packet sent => terminating");
 									file.close();
 									blknum = 0;
-
 									state = S_IDLE;
 									break;
 								}
@@ -631,9 +619,8 @@ public:
 							}
 							else
 							{
-								icmp.setPayload (TFTPErrorPacket (icmp.payload(), cookie, E_UNDEF, "block number or cookie in ACK packet does not match").packet());
-								LOG4CXX_DEBUG (logger, "block number or cookie in ACK packet does not match - sending error packet to client");
-
+								icmppkt.setPayload (TFTP::ErrorPacket (icmppkt.payload(), cookie, E_UNDEF, "block number in ACK packet does not match").packet());
+								LOG4CXX_ERROR (logger, "block number in ACK packet does not match - sending error packet to client");
 								file.close();
 								blknum = 0;
 								state = S_IDLE;
@@ -643,51 +630,47 @@ public:
 						}
 						else
 						{
-							icmp.setPayload (TFTPErrorPacket (icmp.payload(), cookie, E_ILLEGAL_OPCODE, "unexpected opcode (expected OP_ACK)").packet());
-							LOG4CXX_INFO (logger, "unexpected opcode (expected OP_ACK) - sending error packet to client");
-
+							icmppkt.setPayload (TFTP::ErrorPacket (icmppkt.payload(), cookie, E_ILLEGAL_OPCODE, "unexpected opcode (expected OP_ACK) or wrong cookie").packet());
+							LOG4CXX_ERROR (logger, "unexpected opcode (expected OP_ACK) or wrong cookie - sending error packet to client");
 							file.close();
 							blknum = 0;
 							state = S_IDLE;
 							break;
 						}
 					} // S_WAIT_FOR_ACK
-				}
+				} // end while
 
 				//
 				// re-inject packet into network stack
 				//
-				icmp.calcChecksum();
-				ip.setPayload (icmp.packet());
-				ip.calcChecksum();
+				ippkt.setPayload (icmppkt.packet());
 
-				sock.sendTo (ip.packet().m_addr, ip.packet().m_size, sender);
+				sock.sendTo (ippkt.packet().m_addr, ippkt.packet().m_size, sender);
 				LOG4CXX_INFO (logger, "IP packet re-injected");
-				LOG4CXX_DEBUG (logger, "hex dump of packet:\n" << hexdump (ip.packet().m_addr, ip.packet().m_size));
-			}
+				LOG4CXX_TRACE (logger, "hex dump of packet:\n" << hexdump (ippkt.packet().m_addr, ippkt.packet().m_size));
+			} // end while
 		}
 		catch (std::exception &e)
 		{
 			LOG4CXX_ERROR (logger, "exception occurred: " << e.what());
 			return EXIT_OSERR;
 		}
-		// TODO: Do we need to close the socket?
 		return EXIT_OK;
 	}
 
 
 	~TFTPServer()
 	{
-		// The destructor is currently never called because we don't catch any signals
-//		LOG4CXX_INFO (logger, "server is shutting down...");
+		// TODO: The destructor is currently never called because we don't catch Ctrl-c
+		LOG4CXX_INFO (logger, "server is shutting down...");
 		delete[] buffer.m_addr;
 	}
 };
 
 
+
 int main (int argc, char ** argv)
 {
-	// TODO: catch Ctrl-C
     TFTPServer server;
     return server.run (argc, argv);
 }
