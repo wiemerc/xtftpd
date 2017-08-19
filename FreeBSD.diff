@@ -1,0 +1,22 @@
+--- FreeBSD.orig	2014-10-25 13:26:31.000000000 +0200
++++ FreeBSD	2014-10-25 13:20:13.000000000 +0200
+@@ -3,7 +3,7 @@
+ #
+ # FreeBSD
+ #
+-# Make settings for FreeBSD 6.0/gcc 3.4
++# Make settings for FreeBSD 10.0/clang 3.3
+ #
+ #
+ 
+@@ -15,8 +15,8 @@
+ #
+ # Define Tools
+ #
+-CC      = gcc
+-CXX     = g++
++CC      = cc
++CXX     = c++
+ LINK    = $(CXX)
+ LIB     = ar -cr
+ RANLIB  = ranlib

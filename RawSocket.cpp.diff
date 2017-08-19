@@ -1,0 +1,13 @@
+--- RawSocket.cpp.orig	2014-10-25 12:09:46.000000000 +0200
++++ RawSocket.cpp	2014-10-24 07:21:04.000000000 +0200
+@@ -52,8 +52,8 @@
+ }
+ 
+ 
+-RawSocket::RawSocket(IPAddress::Family family, int proto): 
+-	Socket(new RawSocketImpl(family, proto))
++RawSocket::RawSocket(IPAddress::Family family, int proto, bool inclHeader): 
++	Socket(new RawSocketImpl(family, proto, inclHeader))
+ {
+ }
+ 
